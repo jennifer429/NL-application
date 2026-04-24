@@ -34,13 +34,42 @@ app.post("/predict", (req, res) => {
     total_priors: totalPriors,
   });
 
-  const response = predict(request, undefined, pairCache);
+  let response: { predictions: Array<{ case_id: string; study_id: string; predicted_is_relevant: boolean }> };
+  try {
+    response = predict(request, undefined, pairCache);
+  } catch (err) {
+    log("predict.error", {
+      request_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    response = { predictions: [] };
+  }
 
+  // Belt-and-suspenders: guarantee one prediction per prior even if predict()
+  // threw partway through or returned an unexpected shape. Skips count as
+  // incorrect under the challenge scoring rule, so a conservative "false" is
+  // better than a missing row (base rate of priors is 76% not-relevant).
   if (response.predictions.length !== totalPriors) {
-    log("predict.assertion_failed", {
+    const seen = new Set(response.predictions.map((p) => `${p.case_id}|${p.study_id}`));
+    let padded = 0;
+    for (const c of request.cases) {
+      for (const p of c.prior_studies) {
+        const k = `${c.case_id}|${p.study_id}`;
+        if (!seen.has(k)) {
+          response.predictions.push({
+            case_id: c.case_id,
+            study_id: p.study_id,
+            predicted_is_relevant: false,
+          });
+          padded++;
+        }
+      }
+    }
+    log("predict.padded", {
       request_id,
       expected: totalPriors,
-      got: response.predictions.length,
+      original: response.predictions.length - padded,
+      padded,
     });
   }
 
